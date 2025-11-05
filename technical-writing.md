@@ -7,7 +7,7 @@
 # 현재 구조
 
 우선 문제의 원인을 찾기 전, 문제가 발생하는 페이지인 `UserDashboard`페이지의 구조를 살펴보면 아래와 같다.
-<img src="https://velog.velcdn.com/images/yeongipark/post/4b69aec6-6c46-  4ad6-8e7f-405b779f342b/image.png" height="250px" width="400px" />
+<img src="https://velog.velcdn.com/images/yeongipark/post/4b69aec6-6c46-4ad6-8e7f-405b779f342b/image.png" height="250px" width="400px" />
 
 이를 **트리 구조**로 바꿔서 보면 아래와 같다.
 
